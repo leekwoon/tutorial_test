@@ -55,7 +55,9 @@ gdown --id 1w8G7txx4ArvLPyRXNgJ8E6KBPPqxc0Ab
 mv test_labels.csv data
 
 # 모델 파라미터 (checkpoint 등)
-gdown "https://drive.google.com/drive/folders/1Jx5nYAj9NLMjANRd8b5_iQKZvYug2yiq" --folder
+gdown "https://drive.google.com/drive/folders/1each5iWfjFS6_-PeFLZWOl5W3ozz2-kd" --folder
+mv models/* checkpoints
+
 ```
 위 과정을 수행하면, xai_ddk_multi 디렉토리 내부가 아래 예시와 같이 구성됩니다:
 ```bash
@@ -246,7 +248,7 @@ class FeaturesGenerator(object):
 
         return spec_w2v_x, features 
 
-df_labels = pd.read_csv(os.path.join(APP_ROOT, 'tutorial_logs/test_labels.csv'))
+df_labels = pd.read_csv(os.path.join(APP_ROOT, 'data/test_labels.csv'))
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = DDKWav2VecModel.load_from_checkpoint(os.path.join(MODEL_DIR, "multi_input_model.ckpt")).to(device).eval()
@@ -313,130 +315,11 @@ df_2 = pd.DataFrame(data_2, columns=column_names)
 df_2.to_csv(os.path.join(APP_ROOT, 'logs/test_data_2.csv'), index=False)
 ```
 
-## 모델 Inference 및 예측 결과 저장
-
-위에서 생성된 `test_data_1.csv`와 `test_data_2.csv`를 로드하여 마비말 모델에 입력하고, id, task_id별 **심각도 예측**(0/1/2)을 CSV(test_preds.csv)에 저장합니다.
-```python
-import joblib
-import numpy as np
-
-scaler = joblib.load(os.path.join(APP_ROOT, "scaler.save"))
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = DDKWav2VecModel.load_from_checkpoint(os.path.join(MODEL_DIR, "multi_input_model.ckpt")).to(device).eval()
-
-df1 = pd.read_csv(os.path.join(APP_ROOT, 'logs/test_data_1.csv'), dtype={'task_id': str})
-df2 = pd.read_csv(os.path.join(APP_ROOT, 'logs/test_data_2.csv'), dtype={'task_id': str})
-
-results = []
-
-for (idx1, row1), (idx2, row2) in zip(df1.iterrows(), df2.iterrows()):
-    id = row1['id']
-    task_id = row1['task_id']
-
-    # 첫 두 컬럼(id, task_id)를 제외하고 나머지를 선택
-    row1_filtered = row1.iloc[2:]  # iloc[2:]를 사용하여 2번째 이후의 값들만 선택
-    
-    # 나머지 값을 PyTorch 텐서로 변환
-    spec_w2v_x = torch.tensor(row1_filtered.values.astype(np.float32), dtype=torch.float32, device=device)
-    spec_w2v_x = spec_w2v_x.unsqueeze(dim=0)
-
-    # 첫 두 컬럼(id, task_id)를 제외하고 나머지를 선택
-    row2_filtered = row2.iloc[2:]  # iloc[2:]를 사용하여 2번째 이후의 값들만 선택
-    char_x = scaler.transform([row2_filtered.values])
-    char_x = torch.tensor(char_x).float().to(device)
-    
-    # Characteristics projection
-    char_x_pro = model.char_layer(char_x)
-
-    # CNN + wav2vec + characteristics concat
-    total_x = torch.cat([spec_w2v_x, char_x_pro], dim=-1)
-    
-    # Final output
-    out = model.final_layer(total_x)
-
-    severity = torch.argmax(out, dim=-1)[0]
-    severity = int(severity)
-
-    # 결과 저장
-    results.append({'id': id, 'task_id': task_id, 'severity': severity})
-
-# 결과를 DataFrame으로 변환
-results_df = pd.DataFrame(results)
-
-# 결과 DataFrame을 CSV 파일로 저장
-results_df.to_csv(os.path.join(APP_ROOT, 'logs/test_preds.csv'), index=False)
-```
-
-**마비말 진단 모델 예측 성능 출력 결과 예시**
-```python
-
-from sklearn.metrics import classification_report
-
-# Load the two CSV files
-test_labels = pd.read_csv(os.path.join(APP_ROOT, 'data/test_labels.csv'))
-test_preds = pd.read_csv(os.path.join(APP_ROOT, 'logs/test_preds.csv'))
-
-# Merge the files on 'id'
-merged_df = pd.merge(test_labels, test_preds, on='id', suffixes=('_true', '_pred'))
-
-# Calculate the accuracy for each task
-task_ids = merged_df['task_id'].unique()
-task_accuracies = {}
-
-for task_id in task_ids:
-    task_df = merged_df[merged_df['task_id'] == task_id]
-    accuracy = (task_df['severity_true'] == task_df['severity_pred']).mean()
-    task_accuracies[task_id] = accuracy
-
-# Overall accuracy
-overall_accuracy = (merged_df['severity_true'] == merged_df['severity_pred']).mean()
-
-# Classification report (Precision, Recall, F1-score for each class)
-class_report = classification_report(merged_df['severity_true'], merged_df['severity_pred'], target_names=['Class 0', 'Class 1', 'Class 2'])
-
-# Display results
-print("Task-wise accuracies:")
-for task_id, accuracy in task_accuracies.items():
-    print(f"Task {task_id}: {accuracy:.2%}")
-
-print(f"\nOverall accuracy: {overall_accuracy:.2%}")
-
-print("\nClassification Report (Per-Class Performance):")
-print(class_report)
-```
-
-```
-Task-wise accuracies:
-Task 2: 69.64%
-Task 3: 75.00%
-Task 4: 69.64%
-Task 5: 71.43%
-
-Overall accuracy: 71.43%
-
-Classification Report (Per-Class Performance):
-              precision    recall  f1-score   support
-
-     Class 0       0.10      0.06      0.08        32
-     Class 1       0.79      0.88      0.83       180
-     Class 2       0.00      0.00      0.00        12
-
-    accuracy                           0.71       224
-   macro avg       0.30      0.31      0.30       224
-weighted avg       0.65      0.71      0.68       224
-```
-
-> **Note**: task_id는 /퍼/, /터/, /커/, /퍼터커/ 발음과 대응됩니다. 예를 들어:
-> * Task 2: /퍼/ 발음 반복
-> * Task 3: /터/ 발음 반복
-> * Task 4: /커/ 발음 반복
-> * Task 5: /퍼터커/ 연속 발음
-
 ## PnPXAI를 활용한 특징 중요도산출
 본 튜토리얼에서는 `pnpxai.explainers.IntegratedGradients`를 사용하여 특징별 기여도를 산출합니다. 아래 예시에서는 `test_data_1.csv` + `test_data_2.csv`를 concat한 뒤 IG를 구하고, 그 결과를 `test_ig_pnpxai.csv`에 저장합니다.
 
 ```python
+import numpy as np
 import torch.nn as nn
 from pnpxai.explainers import IntegratedGradients
 
@@ -561,18 +444,33 @@ results_df.to_csv(os.path.join(APP_ROOT, 'logs/test_ig_pnpxai.csv'), index=False
 **피쳐 중요도 출력 예시**
 아래는 환자번호 `021`이 `/퍼/` 발음 (task_id = 002)을 수행했을 때, 중증(클래스=2) 판정에 기여한 `DDK 피처 중요도`를 확인하는 예시입니다:
 
+> **Note**: task_id는 /퍼/, /터/, /커/, /퍼터커/ 발음과 대응됩니다. 예를 들어:
+> * Task 2: /퍼/ 발음 반복
+> * Task 3: /터/ 발음 반복
+> * Task 4: /커/ 발음 반복
+> * Task 5: /퍼터커/ 연속 발음
+
 ```python
-print(results_df[
-    (results_df['id'] == '021') & (results_df['task_id'] == '002') & (results_df['shap_class'] == 2)
-][['ddk_rate', 'ddk_average', 'ddk_std', 'ddk_pause_rate', 'ddk_pause_average', 'ddk_pause_std']])
+from pprint import pprint
+
+df_filtered = results_df[
+    (results_df['id'] == '021') &
+    (results_df['task_id'] == '002') &
+    (results_df['shap_class'] == 2)
+][['ddk_rate', 'ddk_average', 'ddk_std', 
+   'ddk_pause_rate', 'ddk_pause_average', 'ddk_pause_std']]
+
+dict_list = df_filtered.to_dict(orient='records')[0]
+pprint(dict_list)
 ```
 
 ```
-   ddk_rate  ddk_average   ddk_std  ddk_pause_rate  ddk_pause_average  \
-5  -0.20948     0.009415 -0.009526        0.015898           0.000584   
-
-   ddk_pause_std  
-5       0.015935  
+{'ddk_average': 0.0094147280714601,
+ 'ddk_pause_average': 0.0005840267535008,
+ 'ddk_pause_rate': 0.0158981472574364,
+ 'ddk_pause_std': 0.0159348086878431,
+ 'ddk_rate': -0.2094800142811265,
+ 'ddk_std': -0.0095264077489048}
 ```
 
 ## 우수/개선 영역 분석
@@ -586,12 +484,14 @@ print(results_df[
     * 그 사이면 보통(1) 로 범주화합니다.
 
 ```python
+from pprint import pprint
 from sklearn.metrics import mean_squared_error
 
 def cal_scores(df, normal_mean, severe_mean):
     ascending = [feature for feature in normal_mean if normal_mean[feature] < severe_mean[feature]]
     descending = [feature for feature in normal_mean if normal_mean[feature] >= severe_mean[feature]]
 
+    # 임의로 서브시스템 분류 예시
     prosody = ['ddk_rate', 'ddk_average', 'ddk_std']
     respiration = ['ddk_pause_rate', 'ddk_pause_average', 'ddk_pause_std']
     vocalization = []
@@ -625,9 +525,85 @@ def cal_scores(df, normal_mean, severe_mean):
     respiration_scores = np.mean([scores[r] for r in respiration if r in scores])
     vocalization_scores = 0 if not vocalization else np.mean([scores[v] for v in vocalization if v in scores])
 
-    subsystem_score = {'prosody': prosody_scores, 'respiration': respiration_scores, 'vocalization': vocalization_scores}
+    subsystem_score = {'prosody': prosody_scores, 
+                       'respiration': respiration_scores, 
+                       'vocalization': vocalization_scores}
 
     return scores, subsystem_score
+
+
+#############################################
+# 2) 환자별 점수를 계산 및 출력하는 함수
+#############################################
+def analyze_patient_scores(patient_id,
+                           shap_class_2_df,
+                           normal_mean,
+                           severe_mean,
+                           features,
+                           df_labels,
+                           tasks=[2, 3, 4, 5]):
+    # ─────────────────────────────────────────────────────────
+    # (1) 언어치료사가 판단한 우수/개선영역 정보 가져오기
+    # ─────────────────────────────────────────────────────────
+    slp_row = df_labels[df_labels['id'] == patient_id]
+    if len(slp_row) > 0:
+        slp_row = slp_row.iloc[0]  # 여러 행이 있으면 첫 번째만 사용(상황에 맞게 조정)
+        slp_excellent_features = [f for f in features if slp_row[f] == 0]
+        slp_improvement_features = [f for f in features if slp_row[f] == 2]
+    else:
+        # 환자 ID가 df_labels에 없는 경우 예외 처리
+        slp_excellent_features = []
+        slp_improvement_features = []
+
+    # ─────────────────────────────────────────────────────────
+    # (2) 모델 기반 점수(Feature Score) 계산
+    # ─────────────────────────────────────────────────────────
+    all_task_scores = {feature: [] for feature in features}
+
+    for task_id in tasks:
+        filtered_data = shap_class_2_df[
+            (shap_class_2_df['id'] == patient_id) &
+            (shap_class_2_df['task_id'] == task_id)
+        ].reset_index(drop=True)
+
+        if len(filtered_data) == 0:
+            # 데이터가 없는 경우에는 NaN 등의 예외 처리를 할 수도 있습니다.
+            for feature in features:
+                all_task_scores[feature].append(np.nan)
+            continue
+
+        feature_score, _ = cal_scores(filtered_data, normal_mean, severe_mean)
+        for feature in features:
+            all_task_scores[feature].append(feature_score[feature])
+
+    # ─────────────────────────────────────────────────────────
+    # (3) 모델 기반 우수/개선영역 산출
+    # ─────────────────────────────────────────────────────────
+    average_scores = {
+        feature: np.nanmean(scores)
+        for feature, scores in all_task_scores.items()
+    }
+
+    excellent_features = [f for f, score in average_scores.items() if score >= 70]
+    improvement_features = [f for f, score in average_scores.items() if score <= 30]
+
+    # ─────────────────────────────────────────────────────────
+    # (4) 결과 출력
+    # ─────────────────────────────────────────────────────────
+    print("=" * 50)
+    print(f"[환자번호] {patient_id}")
+    print("-" * 50)
+    print("[모델 산출]")
+    print(f"ㆍ우수영역 (70점 이상): {excellent_features}")
+    print(f"ㆍ개선영역 (30점 이하): {improvement_features}")
+    print()
+    print("[언어치료사 판단]")
+    print(f"ㆍ우수영역(0): {slp_excellent_features}")
+    print(f"ㆍ개선영역(2): {slp_improvement_features}")
+    print()
+    print("[Feature Average Scores]")
+    pprint(average_scores)
+    print("=" * 50 + "\n")
 
 
 # 데이터 불러오기
@@ -656,91 +632,135 @@ for feature in features:
     severe_mean[feature] = shap_class_2_df[shap_class_2_df['severity'] == 2][feature].mean()
 
 shap_df_class_2 = shap_df[shap_df['shap_class'] == 2]
-df = shap_df_class_2
-labels_df = df_labels
 
-# 결과 저장 리스트
-predicted_classes = []
-
-predicted_scores = []
-for idx, row in df.iterrows():
-    id = row['id']
-    task_id = row['task_id']
-    
-    # 각 row에 대해 feature 점수 계산
-    sample_df = pd.DataFrame([row], columns=df.columns, index=[0])
-    feature_score, _ = cal_scores(sample_df, normal_mean, severe_mean)
-    
-    # id, task_id별로 feature 점수를 저장
-    score_entry = {'id': id, 'task_id': task_id}
-    score_entry.update(feature_score)
-    predicted_scores.append(score_entry)
-
-# task_id별로 계산된 feature 점수를 DataFrame으로 변환
-predicted_df = pd.DataFrame(predicted_scores)
-
-# id별로 feature 점수의 평균을 계산하여 예측값(0, 1, 2)으로 변환
-mean_predicted_df = predicted_df.groupby('id', as_index=False)[features].mean()
-
-# 평균 점수를 기준으로 우수/보통/개선 예측
-for feature in features:
-    mean_predicted_df[f'{feature}_predicted'] = mean_predicted_df[feature].apply(
-        lambda score: 0 if score >= 70 else (2 if score <= 30 else 1)
-    )
-
-# 결과 확인
-# print(mean_predicted_df[[f'{feature}_predicted' for feature in features]])
-
-# 각 feature별로 평균 점수를 기반으로 예측한 `mean_predicted_df`를 `test_labels.csv`와 병합
-comparison_df = labels_df.merge(mean_predicted_df[['id'] + [f'{feature}_predicted' for feature in features]], on='id')
-
-# 정확도 계산
-accuracy = {}
-for feature in features:
-    # 실제 값과 예측된 값을 비교하여 정확도 계산
-    comparison_df[f'{feature}_correct'] = comparison_df[feature] == comparison_df[f'{feature}_predicted']
-    accuracy[feature] = comparison_df[f'{feature}_correct'].mean()
+patient_id = '014'
+analyze_patient_scores(
+    patient_id=patient_id,
+    shap_class_2_df=shap_class_2_df,
+    normal_mean=normal_mean,
+    severe_mean=severe_mean,
+    df_labels=df_labels,
+    features=features,
+    tasks=[2, 3, 4, 5] 
+)
 ```
 
-**예측 신뢰도 출력 예시**
+**정상 환자 우수/개선 영역 출력 예시**
 ```python
-# 정확도 출력
-print("Feature-wise Accuracy compared to test_labels.csv:")
-for feature, acc in accuracy.items():
-    print(f"Accuracy for {feature}: {acc:.2f}")
-
-# 각 feature별로 MSE 계산
-mse = {}
-for feature in features:
-    mse[feature] = mean_squared_error(comparison_df[feature], comparison_df[f'{feature}_predicted'])
-
-# MSE 출력
-print("\nMean Squared Error (MSE) compared to test_labels.csv:")
-for feature, error in mse.items():
-    print(f"MSE for {feature}: {error:.2f}")
+patient_id = '014'
+analyze_patient_scores(
+    patient_id=patient_id,
+    shap_class_2_df=shap_class_2_df,
+    normal_mean=normal_mean,
+    severe_mean=severe_mean,
+    df_labels=df_labels,
+    features=features,
+    tasks=[2, 3, 4, 5] 
+)
 ```
 
 ```
-Feature-wise Accuracy compared to test_labels.csv:
-Accuracy for ddk_rate: 0.77
-Accuracy for ddk_average: 0.68
-Accuracy for ddk_std: 0.61
-Accuracy for ddk_pause_rate: 0.59
-Accuracy for ddk_pause_average: 0.57
-Accuracy for ddk_pause_std: 0.48
+==================================================
+[환자번호] 014
+--------------------------------------------------
+[모델 산출]
+ㆍ우수영역 (70점 이상): ['ddk_rate', 'ddk_average', 'ddk_std', 'ddk_pause_rate', 'ddk_pause_average', 'ddk_pause_std']
+ㆍ개선영역 (30점 이하): []
 
-Mean Squared Error (MSE) compared to test_labels.csv:
-MSE for ddk_rate: 0.23
-MSE for ddk_average: 0.32
-MSE for ddk_std: 0.45
-MSE for ddk_pause_rate: 0.52
-MSE for ddk_pause_average: 0.43
-MSE for ddk_pause_std: 0.84
+[언어치료사 판단]
+ㆍ우수영역(0): ['ddk_rate', 'ddk_average', 'ddk_std', 'ddk_pause_rate', 'ddk_pause_average', 'ddk_pause_std']
+ㆍ개선영역(2): []
+
+[Feature Average Scores]
+{'ddk_average': 91.905,
+ 'ddk_pause_average': 96.72500000000001,
+ 'ddk_pause_rate': 98.4075,
+ 'ddk_pause_std': 82.595,
+ 'ddk_rate': 73.58,
+ 'ddk_std': 93.30250000000001}
+==================================================
+```
+
+**경증 환자 우수/개선 영역 출력 예시**
+```python
+patient_id = 'nia_HC0022'
+analyze_patient_scores(
+    patient_id=patient_id,
+    shap_class_2_df=shap_class_2_df,
+    normal_mean=normal_mean,
+    severe_mean=severe_mean,
+    df_labels=df_labels,
+    features=features,
+    tasks=[2, 3, 4, 5] 
+)
+```
+
+```
+==================================================
+[환자번호] nia_HC0022
+--------------------------------------------------
+[모델 산출]
+ㆍ우수영역 (70점 이상): ['ddk_std']
+ㆍ개선영역 (30점 이하): ['ddk_pause_rate']
+
+[언어치료사 판단]
+ㆍ우수영역(0): ['ddk_std', 'ddk_pause_std']
+ㆍ개선영역(2): []
+
+[Feature Average Scores]
+{'ddk_average': 65.6725,
+ 'ddk_pause_average': 63.587500000000006,
+ 'ddk_pause_rate': 25.0,
+ 'ddk_pause_std': 47.4975,
+ 'ddk_rate': 32.05,
+ 'ddk_std': 90.655}
+==================================================
+```
+
+**중증 환자 우수/개선 영역 출력 예시**
+```python
+patient_id = 'nia_HS0047'
+analyze_patient_scores(
+    patient_id=patient_id,
+    shap_class_2_df=shap_class_2_df,
+    normal_mean=normal_mean,
+    severe_mean=severe_mean,
+    df_labels=df_labels,
+    features=features,
+    tasks=[2, 3, 4, 5] 
+)
+```
+
+```
+==================================================
+[환자번호] nia_HS0047
+--------------------------------------------------
+[모델 산출]
+ㆍ우수영역 (70점 이상): []
+ㆍ개선영역 (30점 이하): ['ddk_rate', 'ddk_average', 'ddk_std', 'ddk_pause_average', 'ddk_pause_std']
+
+[언어치료사 판단]
+ㆍ우수영역(0): []
+ㆍ개선영역(2): ['ddk_rate', 'ddk_average', 'ddk_std', 'ddk_pause_rate', 'ddk_pause_average', 'ddk_pause_std']
+
+[Feature Average Scores]
+{'ddk_average': 13.61,
+ 'ddk_pause_average': 16.035,
+ 'ddk_pause_rate': 30.9425,
+ 'ddk_pause_std': 3.9625,
+ 'ddk_rate': 0.0,
+ 'ddk_std': 14.39}
+==================================================
 ```
 
 > **Note**:
-> * 평가지표 1: Accuracy
->   * 언어치료사가 지정한 우수/개선 영역과 설명 알고리즘을 통해 계산된 우수/개선 영역 간 일치율
-> * 평가지표 2: Mean Squared Error (MSE)
->   * 우수(0) 영역을 개선(2)으로, 또는 개선(2)을 우수(0)으로 잘못 판단한 경우 큰 패널티를 부여
->   * 심각도가 상반되는 영역에서 발생하는 오차의 영향을 강조하여 반영
+> * `ddk_rate`: 일정 시간 내 **음절 반복 횟수** 
+> * `ddk_average`: 각 음절 발음의 **평균 길이**
+> * `ddk_std`: 음절 발음 간 **길이·간격의 규칙성** 
+> * `ddk_pause_rate`: **음절 사이에 발생하는 쉼의 횟수** 
+> * `ddk_pause_average`: **음절 사이 쉼 시간의 평균** 
+> * `ddk_pause_std`: 음절 쉼 시간의 **변동 정도(규칙성)**
+>
+> 정상 환자의 경우, 빠르고 안정된 음절 반복 능력을 보여 여러 피처가 높은 점수(우수)에 해당합니다. 반면, 중증 환자의 경우 대부분 피처 점수가 낮게 나타납니다.
+> 예를 들어, 중증환자의 경우 반복 횟수가 적거나 불규칙, 쉼 횟수와 쉼 길이가 지나치게 길어, 대부분의 피쳐들이 개선이 필요한(2) 영역으로 분류되는 모습을 확인할 수 있습니다.
+
